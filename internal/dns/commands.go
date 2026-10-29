@@ -24,7 +24,11 @@ func PrintDNSHelp() {
 	fmt.Println("  zones delete <zone-id>             Delete a zone and all its resource records")
 	fmt.Println("  records list <zone-id>             List all resource records in a zone")
 	fmt.Println("  records add <zone-id> [flags]      Add a record with Anycast Geo/Latency routing")
-	fmt.Println("  records delete <zone-id> <rec-id>  Delete a record from a zone")
+	fmt.Println("  records delete <zone-id> <rec-id>  Delete a record from a zone (--confirm, --approval-token)")
+	fmt.Println("  records request-delete <domain> <record-id> [--reason <val>]")
+	fmt.Println("                                     Initiate dual-control record deletion challenge")
+	fmt.Println("  approve <request-id> [--actor <val>]")
+	fmt.Println("                                     Authorize pending deletion under two-person rule")
 	fmt.Println("  resolve <name> [flags]             Query live Anycast Geo-steering DNS resolver")
 	fmt.Println("  export <zone-id>                   Export zone in standard RFC 1035 BIND format")
 	fmt.Println("  health                             Inspect Edge DNS Anycast health & global 5-region matrix")
@@ -59,6 +63,10 @@ func HandleDNSCommand(client *Client, args []string) error {
 		return handleZones(client, rest)
 	case "records":
 		return handleRecords(client, rest)
+	case "approve", "approve-deletion":
+		return handleApproveDeletion(client, rest)
+	case "request-delete", "request-deletion":
+		return handleRequestDeletion(client, rest)
 	case "resolve":
 		return handleResolve(client, rest)
 	case "export":
@@ -164,13 +172,18 @@ func handleZones(client *Client, args []string) error {
 
 func handleRecords(client *Client, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: aeitron dns records <list|add|delete> <zone-id> [flags]")
+		return errors.New("usage: aeitron dns records <list|add|delete|request-delete> <zone-id> [flags]")
 	}
 
 	action := args[0]
 	rest := args[1:]
 
 	switch action {
+	case "request-delete", "request-deletion":
+		return handleRequestDeletion(client, rest)
+
+	case "approve", "approve-deletion":
+		return handleApproveDeletion(client, rest)
 	case "list":
 		if len(rest) == 0 {
 			return errors.New("usage: aeitron dns records list <zone-id>")
@@ -265,14 +278,34 @@ func handleRecords(client *Client, args []string) error {
 
 	case "delete":
 		if len(rest) < 2 {
-			return errors.New("usage: aeitron dns records delete <zone-id> <record-id>")
+			return errors.New("usage: aeitron dns records delete <zone-id> <record-id> [--confirm] [--approval-token <token>]")
 		}
 		zoneID := rest[0]
 		recordID := rest[1]
+
+		fs := flag.NewFlagSet("records delete", flag.ContinueOnError)
+		var confirm bool
+		var approvalToken string
+		fs.BoolVar(&confirm, "confirm", false, "Confirm deletion of protected record")
+		fs.StringVar(&approvalToken, "approval-token", "", "Challenge approval token from two-person approval workflow")
+		if err := fs.Parse(rest[2:]); err != nil {
+			return err
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		if err := client.DeleteRecord(ctx, zoneID, recordID); err != nil {
+		if err := client.DeleteRecord(ctx, zoneID, recordID, confirm, approvalToken); err != nil {
+			if strings.Contains(err.Error(), "APPROVAL_REQUIRED") || strings.Contains(err.Error(), "del_req_") {
+				fmt.Println("--------------------------------------------------------------------------------")
+				fmt.Println(" [SECURITY CHALLENGE] Independent Operator Approval Required")
+				fmt.Println("--------------------------------------------------------------------------------")
+				fmt.Printf("This DNS record is protected by the two-person rule.\n%v\n\n", err)
+				fmt.Println("Required Steps:")
+				fmt.Printf(" 1. Request an authorized operator to approve:\n    aeitron dns approve <request-id> --actor <operator-id>\n")
+				fmt.Printf(" 2. Re-run deletion with approval token and --confirm:\n    aeitron dns records delete %s %s --confirm --approval-token <token>\n", zoneID, recordID)
+				return errors.New("record deletion blocked pending human operator approval")
+			}
 			return err
 		}
 		fmt.Printf("SUCCESS: Deleted record %q from zone %q\n", recordID, zoneID)
@@ -461,5 +494,86 @@ func handleFailover(client *Client, args []string) error {
 	}
 	w.Flush()
 	fmt.Println("================================================================================")
+	return nil
+}
+
+func handleApproveDeletion(client *Client, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: aeitron dns approve <request-id> [--actor <val>]")
+	}
+	requestID := args[0]
+	fs := flag.NewFlagSet("dns approve", flag.ContinueOnError)
+	var actor string
+	fs.StringVar(&actor, "actor", "", "Operator ID authorizing the deletion")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if actor == "" {
+		actor = os.Getenv("USER")
+		if actor == "" {
+			actor = os.Getenv("USERNAME")
+		}
+		if actor == "" {
+			actor = "human_operator"
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := client.ApproveRecordDeletion(ctx, requestID, actor)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("================================================================================")
+	fmt.Println(" DNS RECORD DELETION APPROVED (DUAL-CONTROL RULE)")
+	fmt.Println("================================================================================")
+	fmt.Printf("Request ID:     %s\n", result.RequestID)
+	fmt.Printf("Status:         %s\n", result.Status)
+	fmt.Printf("Approved By:    %s\n", result.ApprovedBy)
+	fmt.Printf("Approval Token: %s\n", result.ApprovalToken)
+	fmt.Printf("Valid Until:    %s\n", result.ValidUntil.Format(time.RFC3339))
+	fmt.Printf("Message:        %s\n", result.Message)
+	fmt.Println()
+	fmt.Println("To complete deletion with this token:")
+	fmt.Printf("  aeitron dns records delete <zone-id> <record-id> --confirm --approval-token %s\n", result.ApprovalToken)
+	return nil
+}
+
+func handleRequestDeletion(client *Client, args []string) error {
+	if len(args) < 2 {
+		return errors.New("usage: aeitron dns records request-delete <domain> <record-id> [--reason <val>]")
+	}
+	domain := args[0]
+	recordID := args[1]
+	fs := flag.NewFlagSet("dns request-delete", flag.ContinueOnError)
+	var reason string
+	fs.StringVar(&reason, "reason", "Administrative deletion requested", "Reason for record deletion")
+	if err := fs.Parse(args[2:]); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := client.RequestRecordDeletion(ctx, domain, recordID, reason)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("================================================================================")
+	fmt.Println(" DNS RECORD DELETION REQUEST INITIATED")
+	fmt.Println("================================================================================")
+	fmt.Printf("Request ID:      %s\n", result.RequestID)
+	fmt.Printf("Domain:          %s\n", result.Domain)
+	fmt.Printf("Record ID:       %s\n", result.RecordID)
+	fmt.Printf("Requester:       %s\n", result.Requester)
+	fmt.Printf("Status:          %s\n", result.Status)
+	fmt.Printf("Challenge Token: %s\n", result.ChallengeToken)
+	fmt.Printf("Expires At:      %s\n", result.ExpiresAt.Format(time.RFC3339))
+	fmt.Println()
+	fmt.Println("An independent operator must approve this request before deletion can proceed:")
+	fmt.Printf("  aeitron dns approve %s --actor <operator-id>\n", result.RequestID)
 	return nil
 }

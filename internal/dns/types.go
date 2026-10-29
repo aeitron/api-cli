@@ -135,3 +135,24 @@ type FailoverEvent struct {
 	TriggeredBy  string               `json:"triggered_by"`
 	BGPWithdrawn bool                 `json:"bgp_withdrawn"`
 }
+
+// DnsDeletionRequest represents an initiated record deletion under human approval policy.
+type DnsDeletionRequest struct {
+	RequestID      string    `json:"requestId"`
+	Domain         string    `json:"domain"`
+	RecordID       string    `json:"recordId"`
+	Requester      string    `json:"requester"`
+	Status         string    `json:"status"`
+	ExpiresAt      time.Time `json:"expiresAt"`
+	ChallengeToken string    `json:"challengeToken"`
+}
+
+// DnsApprovalResult represents the outcome of an independent operator approval.
+type DnsApprovalResult struct {
+	Status        string    `json:"status"`
+	RequestID     string    `json:"requestId"`
+	ApprovedBy    string    `json:"approvedBy"`
+	ApprovalToken string    `json:"approvalToken"`
+	ValidUntil    time.Time `json:"validUntil"`
+	Message       string    `json:"message"`
+}

@@ -79,6 +79,48 @@ func TestDNSCLICommands_EndToEnd(t *testing.T) {
 			w.Header().Set("Content-Type", "text/plain")
 			w.Write([]byte("$ORIGIN testdomain.com.\n@ IN SOA ns1.aeitron.net. hostmaster 1 10800 3600 604800 300\n"))
 
+		case r.URL.Path == "/v1/dns/request-deletion" && r.Method == http.MethodPost:
+			var payload map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			delReq := DnsDeletionRequest{
+				RequestID:      "del_req_mock_456",
+				Domain:         payload["domain"],
+				RecordID:       payload["record_id"],
+				Requester:      "test_operator",
+				Status:         "PENDING_APPROVAL",
+				ExpiresAt:      time.Now().Add(10 * time.Minute),
+				ChallengeToken: "tok_approval_789",
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(delReq)
+
+		case r.URL.Path == "/v1/dns/approve-deletion" && r.Method == http.MethodPost:
+			var payload map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			approval := DnsApprovalResult{
+				Status:        "APPROVED",
+				RequestID:     payload["requestId"],
+				ApprovedBy:    payload["actor"],
+				ApprovalToken: "tok_approval_789",
+				ValidUntil:    time.Now().Add(10 * time.Minute),
+				Message:       "Operator authorization granted",
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(approval)
+
+		case r.URL.Path == "/v1/zones/zone-test-123/records/rec-protected-001" && r.Method == http.MethodDelete:
+			q := r.URL.Query()
+			if q.Get("confirm") != "true" || q.Get("approval_token") != "tok_approval_789" {
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error":     "APPROVAL_REQUIRED: Record deletion requires challenge approval",
+					"requestId": "del_req_mock_456",
+				})
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "DELETED"})
+
 		case r.URL.Path == "/v1/zones/zone-test-123/records/rec-test-001" && r.Method == http.MethodDelete:
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "DELETED"})
 
@@ -133,14 +175,70 @@ func TestDNSCLICommands_EndToEnd(t *testing.T) {
 		t.Fatalf("export failed: %v", err)
 	}
 
-	// 7. Delete Record
+	// 7. Request deletion of protected record (initiates challenge)
+	if err := HandleDNSCommand(client, []string{
+		"records", "request-delete", "testdomain.com", "rec-protected-001",
+		"--reason", "Decommissioning legacy CNAME",
+	}); err != nil {
+		t.Fatalf("records request-delete failed: %v", err)
+	}
+
+	// 8. Attempt deletion without token / confirm (must fail with challenge guidance)
+	if err := HandleDNSCommand(client, []string{"records", "delete", "zone-test-123", "rec-protected-001"}); err == nil {
+		t.Fatalf("records delete on protected record without approval expected challenge error, got nil")
+	}
+
+	// 9. Independent operator approves deletion
+	if err := HandleDNSCommand(client, []string{"approve", "del_req_mock_456", "--actor", "operator_security_lead"}); err != nil {
+		t.Fatalf("approve failed: %v", err)
+	}
+
+	// 10. Execute deletion with approval token and confirm flag
+	if err := HandleDNSCommand(client, []string{
+		"records", "delete", "zone-test-123", "rec-protected-001",
+		"--confirm", "--approval-token", "tok_approval_789",
+	}); err != nil {
+		t.Fatalf("records delete with approval token failed: %v", err)
+	}
+
+	// 11. Delete Unprotected Record
 	if err := HandleDNSCommand(client, []string{"records", "delete", "zone-test-123", "rec-test-001"}); err != nil {
 		t.Fatalf("records delete failed: %v", err)
 	}
 
-	// 8. Delete Zone
+	// 12. Delete Zone
 	if err := HandleDNSCommand(client, []string{"zones", "delete", "zone-test-123"}); err != nil {
 		t.Fatalf("zones delete failed: %v", err)
+	}
+}
+
+func TestDNSCLICommands_FailClosed(t *testing.T) {
+	// Client configured in fail-closed mode pointing to unreachable endpoint
+	client := &Client{
+		BaseURL:    "http://127.0.0.1:59999",
+		HealthURL:  "http://127.0.0.1:59999",
+		FailClosed: true,
+		HTTPClient: &http.Client{Timeout: 500 * time.Millisecond},
+	}
+
+	// Health status must fail closed
+	if err := HandleDNSCommand(client, []string{"health"}); err == nil {
+		t.Fatalf("health in fail-closed mode expected error on unreachable backend, got nil")
+	}
+
+	// Drain PoP must fail closed
+	if err := HandleDNSCommand(client, []string{"drain", "--reason", "emergency"}); err == nil {
+		t.Fatalf("drain in fail-closed mode expected error on unreachable backend, got nil")
+	}
+
+	// Restore PoP must fail closed
+	if err := HandleDNSCommand(client, []string{"restore"}); err == nil {
+		t.Fatalf("restore in fail-closed mode expected error on unreachable backend, got nil")
+	}
+
+	// Failover events must fail closed
+	if err := HandleDNSCommand(client, []string{"failover"}); err == nil {
+		t.Fatalf("failover in fail-closed mode expected error on unreachable backend, got nil")
 	}
 }
 
