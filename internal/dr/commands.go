@@ -81,6 +81,9 @@ func resolveTenantID(args []string) string {
 			return args[i+1]
 		}
 	}
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return args[0]
+	}
 	if envTenant := os.Getenv("AEITRON_TENANT_ID"); envTenant != "" {
 		return envTenant
 	}

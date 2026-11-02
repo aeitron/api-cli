@@ -99,6 +99,7 @@ type TestInferenceResult struct {
 type Client struct {
 	ControlPlaneURL string
 	GatewayURL      string
+	SchedulerURL    string
 	AuthToken       string
 	HTTPClient      *http.Client
 }
@@ -113,6 +114,10 @@ func NewClient() *Client {
 	if gwURL == "" {
 		gwURL = "http://127.0.0.1:8080"
 	}
+	schedURL := os.Getenv("AEITRON_SCHEDULER_ENDPOINT")
+	if schedURL == "" {
+		schedURL = "http://127.0.0.1:9092"
+	}
 	token := os.Getenv("AEITRON_CP_AUTH_TOKEN")
 	if token == "" {
 		token = "dev-fixture-key-01"
@@ -121,11 +126,19 @@ func NewClient() *Client {
 	return &Client{
 		ControlPlaneURL: strings.TrimRight(cpURL, "/"),
 		GatewayURL:      strings.TrimRight(gwURL, "/"),
+		SchedulerURL:    strings.TrimRight(schedURL, "/"),
 		AuthToken:       token,
 		HTTPClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
 	}
+}
+
+func (c *Client) getSchedulerURL() string {
+	if c.SchedulerURL != "" {
+		return strings.TrimRight(c.SchedulerURL, "/")
+	}
+	return strings.TrimRight(c.ControlPlaneURL, "/")
 }
 
 // ListProviders retrieves the registered AI providers for a project.
@@ -251,6 +264,9 @@ func (c *Client) GetAnalytics(ctx context.Context) (*AnalyticsResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to construct request: %w", err)
 	}
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -306,6 +322,9 @@ func (c *Client) TestInference(ctx context.Context, model, prompt, strategy, jur
 	req.Header.Set("X-Aeitron-Routing-Strategy", strategy)
 	if jurisdiction != "" {
 		req.Header.Set("X-Aeitron-Jurisdiction", jurisdiction)
+	}
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
 	}
 
 	resp, err := c.HTTPClient.Do(req)
@@ -439,7 +458,7 @@ type ClusterHealthResponse struct {
 
 // RouteInference invokes the Multi-Objective Intelligent AI Router on the Control Plane.
 func (c *Client) RouteInference(ctx context.Context, req AIRouteRequest) (*AIRouteResponse, error) {
-	url := fmt.Sprintf("%s/v1/ai/route", strings.TrimRight(c.ControlPlaneURL, "/"))
+	url := fmt.Sprintf("%s/v1/ai/route", c.getSchedulerURL())
 	data, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize request: %w", err)
@@ -470,7 +489,7 @@ func (c *Client) RouteInference(ctx context.Context, req AIRouteRequest) (*AIRou
 
 // ListClusters retrieves live GPU cluster telemetry from the Control Plane.
 func (c *Client) ListClusters(ctx context.Context) ([]GPUCluster, error) {
-	url := fmt.Sprintf("%s/v1/ai/clusters", strings.TrimRight(c.ControlPlaneURL, "/"))
+	url := fmt.Sprintf("%s/v1/ai/clusters", c.getSchedulerURL())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -502,7 +521,7 @@ func (c *Client) ListClusters(ctx context.Context) ([]GPUCluster, error) {
 
 // IngestClusterTelemetry sends live die temperature and power draw to the cluster state machine.
 func (c *Client) IngestClusterTelemetry(ctx context.Context, clusterID string, tempCelsius, powerWatts float64) (*ClusterTelemetryResponse, error) {
-	url := fmt.Sprintf("%s/v1/ai/clusters/%s/telemetry", strings.TrimRight(c.ControlPlaneURL, "/"), clusterID)
+	url := fmt.Sprintf("%s/v1/ai/clusters/%s/telemetry", c.getSchedulerURL(), clusterID)
 	payload := map[string]float64{
 		"temperature_celsius": tempCelsius,
 		"power_watts":         powerWatts,
@@ -532,9 +551,41 @@ func (c *Client) IngestClusterTelemetry(ctx context.Context, clusterID string, t
 		return nil, fmt.Errorf("telemetry ingestion failed (%d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	var res ClusterTelemetryResponse
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	var raw struct {
+		ClusterID          string  `json:"cluster_id"`
+		HealthStatus       string  `json:"health_status"`
+		TemperatureCelsius float64 `json:"temperature_celsius"`
+		PowerWatts         float64 `json:"power_watts"`
+		ThrottleFactor     float64 `json:"throttle_factor"`
+		EventRecorded      bool    `json:"event_recorded"`
+		Event              *struct {
+			ClusterID          string  `json:"cluster_id"`
+			NewState           string  `json:"new_state"`
+			TemperatureCelsius float64 `json:"temperature_celsius"`
+			PowerWatts         float64 `json:"power_watts"`
+			ThrottleFactor     float64 `json:"throttle_factor"`
+			Description        string  `json:"description"`
+		} `json:"event"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("failed to decode telemetry response: %w", err)
+	}
+
+	res := ClusterTelemetryResponse{
+		ClusterID:          raw.ClusterID,
+		HealthStatus:       raw.HealthStatus,
+		TemperatureCelsius: raw.TemperatureCelsius,
+		PowerWatts:         raw.PowerWatts,
+		ThrottleFactor:     raw.ThrottleFactor,
+		EventRecorded:      raw.EventRecorded,
+	}
+	if res.ClusterID == "" && raw.Event != nil {
+		res.ClusterID = raw.Event.ClusterID
+		res.HealthStatus = raw.Event.NewState
+		res.TemperatureCelsius = raw.Event.TemperatureCelsius
+		res.PowerWatts = raw.Event.PowerWatts
+		res.ThrottleFactor = raw.Event.ThrottleFactor
+		res.EventRecorded = true
 	}
 
 	return &res, nil
@@ -542,7 +593,7 @@ func (c *Client) IngestClusterTelemetry(ctx context.Context, clusterID string, t
 
 // GetClusterHealth retrieves the current thermal state and throttle factor for a cluster.
 func (c *Client) GetClusterHealth(ctx context.Context, clusterID string) (*ClusterHealthResponse, error) {
-	url := fmt.Sprintf("%s/v1/ai/clusters/%s/health", strings.TrimRight(c.ControlPlaneURL, "/"), clusterID)
+	url := fmt.Sprintf("%s/v1/ai/clusters/%s/health", c.getSchedulerURL(), clusterID)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err

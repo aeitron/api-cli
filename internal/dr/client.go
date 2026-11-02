@@ -26,7 +26,7 @@ func NewClient() *Client {
 		endpoint = os.Getenv("AEITRON_DR_ENDPOINT")
 	}
 	if endpoint == "" {
-		endpoint = "http://127.0.0.1:8099"
+		endpoint = "http://127.0.0.1:8101"
 	}
 
 	token := os.Getenv("AEITRON_CONTROL_PLANE_TOKEN")

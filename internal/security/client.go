@@ -24,15 +24,18 @@ type Client struct {
 func NewClient() *Client {
 	endpoint := os.Getenv("AEITRON_SECURITY_ENDPOINT")
 	if endpoint == "" {
-		endpoint = os.Getenv("AEITRON_CP_ENDPOINT")
-	}
-	if endpoint == "" {
 		endpoint = "http://127.0.0.1:9094"
 	}
 
-	token := os.Getenv("AEITRON_CP_AUTH_TOKEN")
+	token := os.Getenv("AEITRON_SECURITY_AUTH_TOKEN")
+	if token == "" {
+		token = os.Getenv("AEITRON_CP_AUTH_TOKEN")
+	}
 	if token == "" {
 		token = os.Getenv("AEITRON_API_KEY")
+	}
+	if token == "" {
+		token = "dev-fixture-key-01"
 	}
 
 	return &Client{

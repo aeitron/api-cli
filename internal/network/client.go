@@ -114,10 +114,7 @@ type Client struct {
 func NewClient() *Client {
 	endpoint := os.Getenv("AEITRON_GLOBAL_ROUTER_ENDPOINT")
 	if endpoint == "" {
-		endpoint = os.Getenv("AEITRON_CP_ENDPOINT")
-	}
-	if endpoint == "" {
-		endpoint = "http://127.0.0.1:9091"
+		endpoint = "http://127.0.0.1:9090"
 	}
 
 	ccEndpoint := os.Getenv("AEITRON_CONFIG_CONTROLLER_ENDPOINT")
@@ -125,7 +122,7 @@ func NewClient() *Client {
 		ccEndpoint = os.Getenv("AEITRON_EDGE_ENDPOINT")
 	}
 	if ccEndpoint == "" {
-		ccEndpoint = "http://127.0.0.1:8080"
+		ccEndpoint = "http://127.0.0.1:9091"
 	}
 
 	bgpEndpoint := os.Getenv("AEITRON_BGP_CONTROLLER_ENDPOINT")
@@ -174,6 +171,7 @@ func (c *Client) sendRequest(ctx context.Context, method, path string, body inte
 	req.Header.Set("Content-Type", "application/json")
 	if c.AuthToken != "" {
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.AuthToken))
+		req.Header.Set("X-API-Key", c.AuthToken)
 	}
 
 	resp, err := c.HTTPClient.Do(req)
