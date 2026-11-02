@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	events "github.com/aeitron/api-cli/pkg/events"
+	events "github.com/iammahmudhasan/aeitron-events"
 )
 
 func TestHandleEventsCommandSchemas(t *testing.T) {

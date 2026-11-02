@@ -6,7 +6,7 @@ import (
 	"os"
 	"text/tabwriter"
 
-	events "github.com/aeitron/api-cli/pkg/events"
+	events "github.com/iammahmudhasan/aeitron-events"
 )
 
 type SchemaRegistryEntry struct {
